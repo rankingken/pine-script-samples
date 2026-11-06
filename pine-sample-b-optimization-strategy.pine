@@ -1,0 +1,149 @@
+//@version=6
+// =============================================================================
+//  Optimization-Ready Strategy Wrapper
+//  Author : Victor Antai / Rankingderiv
+//  Type   : Portfolio sample — freelance Pine Script work
+//
+//  Purpose
+//    A clean, back-testable strategy shell built for parameter optimisation.
+//    Every tunable value is an input with an explicit min / max / STEP,
+//    grouped by function, so sweeps (TradingView's optimiser or an external
+//    runner driving the same inputs) step through values predictably
+//    instead of guessing.
+//
+//  Structure
+//    1 · Signal      — placeholder EMA-cross engine (swap in any indicator)
+//    2 · Filters     — optional trend / RSI gates
+//    3 · Risk        — ATR stop, target or trailing exit, captured at entry
+//    4 · Test window — fixed date range, so every run tests the same market
+//    5 · Reporting   — on-chart levels + a compact results table; the
+//                      Strategy Tester stays free of order spam
+//
+//  To optimise: open the Strategy Tester, vary one grouped input at a time
+//  over its stepped range, and compare profit factor / drawdown in the
+//  stats table before widening the search.
+//
+//  This sample demonstrates code structure and optimisation workflow only.
+//  It makes no claim about the profitability of the placeholder signal.
+// =============================================================================
+strategy("Optimization-Ready Strategy Wrapper [VA]", shorttitle = "Opt Strategy Wrapper [VA]", overlay = true, initial_capital = 10000, currency = currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 2, pyramiding = 0, process_orders_on_close = true)
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+grpSig = "1 · Signal (optimise)"
+grpFlt = "2 · Filters"
+grpRsk = "3 · Risk management (optimise)"
+grpSes = "4 · Test window"
+grpRep = "5 · Reporting"
+
+fastLen   = input.int(9,   "Fast EMA length", minval = 2, maxval = 50,  step = 1, group = grpSig)
+slowLen   = input.int(21,  "Slow EMA length", minval = 5, maxval = 200, step = 1, group = grpSig)
+direction = input.string("Long only", "Direction", options = ["Long only", "Short only", "Both"], group = grpSig)
+
+useTrend  = input.bool(true,  "Trend filter (longs above / shorts below trend EMA)", group = grpFlt)
+trendLen  = input.int(100, "Trend EMA length", minval = 20, maxval = 400, step = 5, group = grpFlt)
+useRsi    = input.bool(false, "RSI momentum filter", group = grpFlt)
+rsiLen    = input.int(14,     "RSI length",  minval = 2,  maxval = 30, step = 1, group = grpFlt)
+rsiMid    = input.float(50.0, "RSI midline", minval = 30, maxval = 70, step = 1, group = grpFlt, tooltip = "Longs need RSI above this line, shorts below it, when the RSI filter is on.")
+
+atrLen    = input.int(14,    "ATR length",            minval = 5,   maxval = 40,  step = 1,    group = grpRsk)
+slMult    = input.float(2.0, "Stop loss (x ATR)",     minval = 0.5, maxval = 6.0, step = 0.25, group = grpRsk)
+tpMult    = input.float(3.0, "Take profit (x ATR)",   minval = 0.5, maxval = 10.0, step = 0.25, group = grpRsk)
+useTrail  = input.bool(false, "Trailing stop instead of fixed take profit", group = grpRsk)
+trailMult = input.float(2.5, "Trail distance (x ATR)", minval = 0.5, maxval = 6.0, step = 0.25, group = grpRsk)
+
+useWindow = input.bool(true, "Restrict test to date window", group = grpSes)
+startTime = input.time(timestamp("01 Jan 2023 00:00 +0000"), "Window start", group = grpSes)
+endTime   = input.time(timestamp("31 Dec 2025 23:59 +0000"), "Window end",   group = grpSes)
+
+showLevels = input.bool(true, "Plot entry SL / TP levels", group = grpRep)
+showStats  = input.bool(true, "Show stats table",          group = grpRep)
+
+// ── Signal engine (placeholder — replace with any indicator's conditions) ────
+fastEma  = ta.ema(close, fastLen)
+slowEma  = ta.ema(close, slowLen)
+trendEma = ta.ema(close, trendLen)
+rsi      = ta.rsi(close, rsiLen)
+atr      = ta.atr(atrLen)
+
+inWindow = not useWindow or (time >= startTime and time <= endTime)
+
+trendOkLong  = not useTrend or close > trendEma
+trendOkShort = not useTrend or close < trendEma
+rsiOkLong    = not useRsi or rsi > rsiMid
+rsiOkShort   = not useRsi or rsi < rsiMid
+
+longSignal  = inWindow and ta.crossover(fastEma, slowEma)  and trendOkLong  and rsiOkLong  and direction != "Short only"
+shortSignal = inWindow and ta.crossunder(fastEma, slowEma) and trendOkShort and rsiOkShort and direction != "Long only"
+
+// ── Entries ──────────────────────────────────────────────────────────────────
+if longSignal and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+
+// ── Risk levels, captured once on the fill bar so they never drift ──────────
+var float longStop  = na
+var float longTp    = na
+var float shortStop = na
+var float shortTp   = na
+
+if strategy.position_size > 0 and strategy.position_size[1] <= 0
+    longStop  := strategy.position_avg_price - atr * slMult
+    longTp    := strategy.position_avg_price + atr * tpMult
+
+if strategy.position_size < 0 and strategy.position_size[1] >= 0
+    shortStop := strategy.position_avg_price + atr * slMult
+    shortTp   := strategy.position_avg_price - atr * tpMult
+
+if strategy.position_size == 0
+    longStop  := na
+    longTp    := na
+    shortStop := na
+    shortTp   := na
+
+// ── Exits ────────────────────────────────────────────────────────────────────
+trailTicks = math.max(1, int(atr * trailMult / syminfo.mintick))
+
+if strategy.position_size > 0
+    if useTrail
+        strategy.exit("Long Exit", from_entry = "Long", stop = longStop, trail_price = strategy.position_avg_price, trail_offset = trailTicks)
+    else
+        strategy.exit("Long Exit", from_entry = "Long", stop = longStop, limit = longTp)
+
+if strategy.position_size < 0
+    if useTrail
+        strategy.exit("Short Exit", from_entry = "Short", stop = shortStop, trail_price = strategy.position_avg_price, trail_offset = trailTicks)
+    else
+        strategy.exit("Short Exit", from_entry = "Short", stop = shortStop, limit = shortTp)
+
+// Flat at the end of the test window, so results are comparable run to run.
+if useWindow and time > endTime and strategy.position_size != 0
+    strategy.close_all(comment = "Test window ended")
+
+// ── Plots ────────────────────────────────────────────────────────────────────
+plot(fastEma, "Fast EMA", color = color.new(color.teal, 0))
+plot(slowEma, "Slow EMA", color = color.new(color.orange, 0))
+plot(useTrend ? trendEma : na, "Trend EMA", color = color.new(color.gray, 40))
+
+plot(showLevels and strategy.position_size > 0 ? longStop  : na, "Long SL",  style = plot.style_linebr, color = color.new(color.red, 0))
+plot(showLevels and strategy.position_size > 0 ? longTp    : na, "Long TP",  style = plot.style_linebr, color = color.new(color.teal, 0))
+plot(showLevels and strategy.position_size < 0 ? shortStop : na, "Short SL", style = plot.style_linebr, color = color.new(color.red, 0))
+plot(showLevels and strategy.position_size < 0 ? shortTp   : na, "Short TP", style = plot.style_linebr, color = color.new(color.teal, 0))
+
+// ── Stats table (clean summary on the last bar) ──────────────────────────────
+var table statsTable = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 80), text_color = color.white, text_size = size.small, border_width = 1, border_color = color.new(color.gray, 50))
+
+if barstate.islast and showStats
+    pf = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+    wr = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : na
+    table.cell(statsTable, 0, 0, "Closed trades")
+    table.cell(statsTable, 1, 0, str.tostring(strategy.closedtrades))
+    table.cell(statsTable, 0, 1, "Win rate")
+    table.cell(statsTable, 1, 1, na(wr) ? "—" : str.tostring(wr, "#.#") + "%")
+    table.cell(statsTable, 0, 2, "Profit factor")
+    table.cell(statsTable, 1, 2, na(pf) ? "—" : str.tostring(pf, "#.##"))
+    table.cell(statsTable, 0, 3, "Net profit")
+    table.cell(statsTable, 1, 3, str.tostring(strategy.netprofit, "#.##"))
+    table.cell(statsTable, 0, 4, "Max drawdown")
+    table.cell(statsTable, 1, 4, str.tostring(strategy.max_drawdown, "#.##"))
