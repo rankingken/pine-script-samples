@@ -1,0 +1,149 @@
+//@version=6
+// =============================================================================
+//  MTF MACD Divergence + Stochastics
+//  Author : Victor Antai / Rankingderiv
+//  Type   : Portfolio sample — freelance Pine Script work
+//
+//  What it does
+//    • MACD calculated on a selectable higher timeframe (request.security,
+//      lookahead off, optional "confirmed HTF bar" mode) with regular
+//      bullish / bearish divergence detection against price pivots.
+//    • Stochastics calculated on its own selectable timeframe, with
+//      overbought / oversold cross signals.
+//    • Divergence is read only from CONFIRMED pivots (the right-side bars
+//      must print before a pivot counts), so a divergence signal, once
+//      printed, never repaints or disappears.
+//    • Full alert set for both engines.
+//
+//  The two engines always run (alerts stay live on both); the Panel input
+//  only chooses which one is plotted, so the pane stays readable.
+// =============================================================================
+indicator("MTF MACD Divergence + Stochastics [VA]", shorttitle = "MTF MACD Div + Stoch [VA]", overlay = false, max_lines_count = 500, max_labels_count = 500)
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+grpM      = "1 · MACD"
+grpS      = "2 · Stochastics"
+grpD      = "3 · Divergence"
+grpP      = "4 · Panel"
+
+panel     = input.string("MACD", "Panel to display", options = ["MACD", "Stochastics"], group = grpP, tooltip = "Both engines always run and alert; this only chooses which one is plotted.")
+
+macdTf    = input.timeframe("240", "MACD timeframe", group = grpM, tooltip = "Higher timeframe for the MACD. Choose 'Chart' to use the chart timeframe.")
+fastLen   = input.int(12, "Fast EMA length", minval = 1, group = grpM)
+slowLen   = input.int(26, "Slow EMA length", minval = 2, group = grpM)
+sigLen    = input.int(9,  "Signal length",   minval = 1, group = grpM)
+macdSrc   = input.source(close, "MACD source", group = grpM)
+confirmed = input.bool(false, "Confirmed HTF bar only (zero repaint)", group = grpM, tooltip = "On: the MACD reads the last CLOSED higher-timeframe bar. Off: live higher-timeframe values.")
+
+kLen      = input.int(14, "%K length",    minval = 1, group = grpS)
+kSmooth   = input.int(3,  "%K smoothing", minval = 1, group = grpS)
+dLen      = input.int(3,  "%D length",    minval = 1, group = grpS)
+stochTf   = input.timeframe("", "Stochastics timeframe", group = grpS, tooltip = "Choose 'Chart' to use the chart timeframe.")
+obLevel   = input.int(80, "Overbought level", minval = 50, maxval = 100, group = grpS)
+osLevel   = input.int(20, "Oversold level",   minval = 0,  maxval = 50,  group = grpS)
+
+leftBars  = input.int(5,  "Pivot left bars",  minval = 1, group = grpD)
+rightBars = input.int(5,  "Pivot right bars", minval = 1, group = grpD, tooltip = "A pivot is only used after this many bars have printed to its right. That wait is what makes the divergence non-repainting.")
+maxGap    = input.int(60, "Max bars between pivots", minval = 5, group = grpD)
+showDiv   = input.bool(true, "Draw divergence lines + labels", group = grpD)
+
+// ── Calculations ─────────────────────────────────────────────────────────────
+f_macd(_src) =>
+    fast = ta.ema(_src, fastLen)
+    slow = ta.ema(_src, slowLen)
+    macd = fast - slow
+    sig  = ta.ema(macd, sigLen)
+    [macd, sig, macd - sig]
+
+// Same MACD, read one higher-timeframe bar back (last closed HTF bar).
+f_macdPrev(_src) =>
+    [m, s, h] = f_macd(_src)
+    [m[1], s[1], h[1]]
+
+f_stoch() =>
+    kRaw = ta.stoch(close, high, low, kLen)
+    k    = ta.sma(kRaw, kSmooth)
+    d    = ta.sma(k, dLen)
+    [k, d]
+
+[macdLive, sigLive, histLive] = request.security(syminfo.tickerid, macdTf, f_macd(macdSrc),     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+[macdConf, sigConf, histConf] = request.security(syminfo.tickerid, macdTf, f_macdPrev(macdSrc), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+macdLine = confirmed ? macdConf : macdLive
+sigLine  = confirmed ? sigConf  : sigLive
+histLine = confirmed ? histConf : histLive
+
+[stochK, stochD] = request.security(syminfo.tickerid, stochTf, f_stoch(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+// ── Divergence engine (MACD line vs price pivots) ────────────────────────────
+ph = ta.pivothigh(high, leftBars, rightBars)
+pl = ta.pivotlow(low,  leftBars, rightBars)
+
+var float lastPhPrice = na
+var float lastPhMacd  = na
+var int   lastPhBar   = na
+var float lastPlPrice = na
+var float lastPlMacd  = na
+var int   lastPlBar   = na
+
+bool bullDiv = false
+bool bearDiv = false
+
+if not na(pl)
+    pPrice = low[rightBars]
+    pMacd  = macdLine[rightBars]
+    pBar   = bar_index - rightBars
+    if not na(lastPlPrice) and pBar - lastPlBar <= maxGap and pPrice < lastPlPrice and pMacd > lastPlMacd
+        bullDiv := true
+        if showDiv
+            line.new(lastPlBar, lastPlMacd, pBar, pMacd, color = color.new(color.teal, 0), width = 2)
+            label.new(pBar, pMacd, "Bull Div", style = label.style_label_up, color = color.new(color.teal, 0), textcolor = color.white, size = size.small)
+    lastPlPrice := pPrice
+    lastPlMacd  := pMacd
+    lastPlBar   := pBar
+
+if not na(ph)
+    pPrice = high[rightBars]
+    pMacd  = macdLine[rightBars]
+    pBar   = bar_index - rightBars
+    if not na(lastPhPrice) and pBar - lastPhBar <= maxGap and pPrice > lastPhPrice and pMacd < lastPhMacd
+        bearDiv := true
+        if showDiv
+            line.new(lastPhBar, lastPhMacd, pBar, pMacd, color = color.new(color.maroon, 0), width = 2)
+            label.new(pBar, pMacd, "Bear Div", style = label.style_label_down, color = color.new(color.maroon, 0), textcolor = color.white, size = size.small)
+    lastPhPrice := pPrice
+    lastPhMacd  := pMacd
+    lastPhBar   := pBar
+
+// ── Stochastic signals ───────────────────────────────────────────────────────
+stochBullCross = ta.crossover(stochK, stochD)  and stochK < osLevel
+stochBearCross = ta.crossunder(stochK, stochD) and stochK > obLevel
+
+// ── Plots ────────────────────────────────────────────────────────────────────
+showMacd  = panel == "MACD"
+histColor = histLine >= 0 ? (histLine > histLine[1] ? #26A69A : #B2DFDB) : (histLine < histLine[1] ? #FF5252 : #FFCDD2)
+
+plot(showMacd ? histLine : na, "Histogram", style = plot.style_columns, color = histColor)
+plot(showMacd ? macdLine : na, "MACD",   color = color.new(#2962FF, 0), linewidth = 2)
+plot(showMacd ? sigLine  : na, "Signal", color = color.new(#FF6D00, 0), linewidth = 1)
+plot(showMacd ? 0 : na, "Zero line", color = color.new(color.gray, 50))
+
+plotshape(showMacd and bullDiv, title = "Bullish divergence", style = shape.triangleup,   location = location.bottom, color = color.new(color.teal, 0),   size = size.small)
+plotshape(showMacd and bearDiv, title = "Bearish divergence", style = shape.triangledown, location = location.top,    color = color.new(color.maroon, 0), size = size.small)
+
+plot(showMacd ? na : stochK, "%K", color = color.new(#2962FF, 0), linewidth = 2)
+plot(showMacd ? na : stochD, "%D", color = color.new(#FF6D00, 0), linewidth = 1)
+plot(showMacd ? na : obLevel, "Overbought", style = plot.style_linebr, color = color.new(color.red, 40))
+plot(showMacd ? na : osLevel, "Oversold",   style = plot.style_linebr, color = color.new(color.teal, 40))
+plot(showMacd ? na : 50,      "Midline",    style = plot.style_linebr, color = color.new(color.gray, 60))
+
+plotshape(not showMacd and stochBullCross, title = "Stoch bullish cross (oversold)", style = shape.triangleup,   location = location.bottom, color = color.new(color.teal, 0),   size = size.tiny)
+plotshape(not showMacd and stochBearCross, title = "Stoch bearish cross (overbought)", style = shape.triangledown, location = location.top,    color = color.new(color.red, 0),    size = size.tiny)
+
+bgcolor(not showMacd and stochK > obLevel ? color.new(color.red, 92) : not showMacd and stochK < osLevel ? color.new(color.teal, 92) : na, title = "Stochastic zone")
+
+// ── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(bullDiv,        title = "Bullish MACD Divergence",        message = "{{exchange}}:{{ticker}} — bullish MACD divergence on the {{interval}} chart.")
+alertcondition(bearDiv,        title = "Bearish MACD Divergence",        message = "{{exchange}}:{{ticker}} — bearish MACD divergence on the {{interval}} chart.")
+alertcondition(stochBullCross, title = "Stoch Bullish Cross (Oversold)", message = "{{exchange}}:{{ticker}} — stochastic crossed up inside the oversold zone on the {{interval}} chart.")
+alertcondition(stochBearCross, title = "Stoch Bearish Cross (Overbought)", message = "{{exchange}}:{{ticker}} — stochastic crossed down inside the overbought zone on the {{interval}} chart.")
